@@ -1,0 +1,284 @@
+---
+title: "Analysis"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyr)
+library(nhanesA)
+library(survey)
+options(survey.lonely.psu = "adjust")  # handles strata with 1 PSU
+library(NHANES)
+library(tidyverse)
+library(ggplot2)
+library(foreign)
+library(haven)
+```
+
+```{r}
+download.file(
+  "https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2021/DataFiles/DEMO_L.xpt",
+  tf <- tempfile(),
+  mode="wb"
+)
+DEMO_L <- foreign::read.xport(tf)
+download.file(
+  "https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2021/DataFiles/DPQ_L.xpt",
+  tf <- tempfile(),
+  mode="wb")
+DPQ_L <- foreign::read.xport(tf)
+download.file(
+  "https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2021/DataFiles/INQ_L.xpt",
+  tf <- tempfile(),
+  mode="wb")
+INCOME_L <- foreign::read.xport(tf)
+```
+
+```{r}
+INCOME_L
+```
+
+```{r}
+One <- left_join(DEMO_L, DPQ_L, by="SEQN")%>%
+  mutate(. ,
+         # create indicator for overall summary
+         one = 1,
+         # create factor variables
+         Sex = factor(RIAGENDR, levels = c(1, 2), labels=c("Male", "Female")),
+         
+         # depression score as sum of variables
+         Depression.score = rowSums(select(. , DPQ010:DPQ090)),
+         Depression = ifelse(Depression.score >=10, 100, 0),
+         
+         Age.Group = cut(RIDAGEYR, breaks=c(11, 20, 40, 60, Inf), labels=c("12-19", "20-39", "40-59", "60 and older")),
+         # exclude NA depression score and include age 12
+         inAnalysis = (RIDAGEYR >= 12 & !is.na(Depression.score))
+  ) %>%
+  # drop DPQ variables
+  select(., -starts_with("DPQ"))
+```
+
+```{r}
+nhanes_all <- svydesign(
+  data = One,
+  id = ~SDMVPSU,
+  strata = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  nest = TRUE
+)
+
+# subset to valid analysis population
+nhanes_sub <- subset(nhanes_all, inAnalysis)
+```
+
+```{r}
+## analysis
+# define function to call svymean and unweighted count
+getSummary <- function(varformula, byformula, design) {
+  # get mean, stderr, and unweighted sample size
+  c <- svyby(varformula, byformula, design, unwtd.count)
+  p <- svyby(varformula, byformula, design, svymean)
+  outSum <- left_join(select(c, -se), p)
+  outSum
+}
+```
+
+```{r}
+##' ### Calculate prevalence of depression overall, by sex, by age group, and by age and sex
+# Adults
+total <- getSummary(~Depression, ~one, nhanes_sub)
+# By Sex
+getSummary(~Depression, ~Sex, nhanes_sub)
+# By Age
+getSummary(~Depression, ~Age.Group, nhanes_sub)
+# By sex and age
+summary <- getSummary(~Depression, ~Sex + Age.Group, nhanes_sub)
+```
+
+```{r}
+# 13% nation depression
+total
+```
+
+```{r}
+summary
+```
+
+```{r}
+ggplot(data=summary, aes(fill=Age.Group, y=Depression,
+                         x=Sex)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7)+
+  geom_text(aes(label=round(Depression, 1)),
+            position = position_dodge(width=0.8), 
+            vjust = -0.5,
+            size=3.5) +
+  scale_fill_manual(values = c("#2b3e8f", "#405ba0", "#7197c5", "#a4c6a8")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  theme_minimal(base_size = 12) + 
+  theme(
+    legend.position = 'top',
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size=12),
+    panel.grid.major.x = element_blank()
+  ) + 
+  labs(y="Percent",
+       fill = "Age Group") +
+  ggtitle("Depression prevalence in people age 12 and older, by sex and age
+group: United States, August 2021–August 2023")
+```
+
+```{r}
+### Compare Prevalence Between Men And Women
+ 
+svyttest(Depression~Sex, subset(nhanes_sub, Age.Group=="12-19"))$p.value %>% as.numeric
+
+svyttest(Depression~Sex, subset(nhanes_sub, Age.Group=="20-39"))$p.value %>% as.numeric
+
+svyttest(Depression~Sex, subset(nhanes_sub, Age.Group=="40-59"))$p.value %>% as.numeric
+```
+
+```{r}
+library(flextable)
+summary <- summary %>%
+  arrange(Sex)
+flextable(summary)
+```
+
+```{r}
+# DPQ_L = depression
+# DEMO_L = demographics
+# INCOME_L = income
+two <- left_join(DEMO_L, DPQ_L, by="SEQN") %>%
+  left_join(INCOME_L, by="SEQN") %>%
+  mutate(. , 
+         # depression score as sum of variables
+         Depression.score = rowSums(select(. , DPQ010:DPQ090)),
+         Depression = ifelse(Depression.score >=10, 100, 0),
+         Sex = factor(RIAGENDR, levels = c(1, 2), labels=c("Male", "Female")),
+         FPL_Percent = INDFMMPI * 100,
+         Income.Group = cut(FPL_Percent, breaks=c(-Inf, 100, 200, 400, Inf),
+                            labels=c("Less than 100% FPL",
+                                     "100% to less than 200% FPL",
+                                     "200% to less than 400% FPL",
+                                     "At or above 400% FPL")),
+         inAnalysis = (RIDAGEYR >= 12 & !is.na(Depression.score)),
+         ) %>%
+  # drop DPQ variables
+  select(., -starts_with("DPQ"))
+```
+
+```{r}
+nhanes_all <- svydesign(
+  data = two,
+  id = ~SDMVPSU,
+  strata = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  nest = TRUE
+)
+# subset to valid analysis population
+nhanes_sub <- subset(nhanes_all, inAnalysis)
+
+summary2 <- getSummary(~Depression, ~Sex + Income.Group, nhanes_sub)
+summary2 <- summary2 %>%
+  arrange(Sex)
+```
+
+```{r}
+ggplot(data=summary2, aes(fill=Income.Group, y=Depression,
+                         x=Sex)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7)+
+  geom_text(aes(label=round(Depression, 1)),
+            position = position_dodge(width=0.8), 
+            vjust = -0.5,
+            size=3.5) +
+  scale_fill_manual(values = c("#2b3e8f", "#405ba0", "#7197c5", "#a4c6a8")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + 
+  theme_minimal(base_size = 12) + 
+  theme(
+    legend.position = 'top',
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size=12),
+    panel.grid.major.x = element_blank()
+  ) + 
+  labs(y="Percent",
+       fill = "Age Group") +
+  ggtitle("Depression prevalence in people age 12 and older,
+  by sex and family income level,United States, Aug 2021–Aug 2023")
+```
+
+```{r}
+third <- left_join(DEMO_L, DPQ_L, by="SEQN") %>%
+  mutate(. ,
+         # create indicator for overall summary
+         one = 1,
+         # create factor variables
+         Sex = factor(RIAGENDR, levels = c(1, 2), labels=c("Male", "Female")),
+         
+         # depression score as sum of variables
+         Depression.score = rowSums(select(. , DPQ010:DPQ090)),
+         Depression = ifelse(Depression.score >=10, 100, 0),
+         
+         difficult = case_when(
+           DPQ100 == 0 ~ "Not difficult",
+           DPQ100 == 1 ~ "Somewhat difficult",
+           DPQ100 %in% c(2, 3) ~ "Very to extremely difficult",
+           TRUE ~ "Missing"
+         ),
+         difficult = factor(difficult,
+                            levels=c("Not difficult",
+                                     "Somewhat difficult",
+                                     "Very to extremely difficult")),
+         
+         # exclude NA depression score and include age 12
+         inAnalysis = (RIDAGEYR >= 12 & !is.na(Depression.score))
+  ) %>%
+  # drop DPQ variables
+  select(., -starts_with("DPQ"))
+```
+
+```{r}
+table(third$Sex)
+```
+
+```{r}
+nhanes_all <- svydesign(
+  data = third,
+  id = ~SDMVPSU,
+  strata = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  nest = TRUE
+)
+
+# subset to valid analysis population
+nhanes_sub <- subset(nhanes_all, inAnalysis)
+
+summary3 <- getSummary(~Depression, ~Sex + difficult, nhanes_sub)
+summary3 <- summary3 %>%
+  group_by(Sex) %>%
+  mutate(percent = counts / sum(counts) * 100)
+
+summary3
+
+```
+
+```{r}
+ggplot(summary3, aes(x=Sex, y=percent, fill=difficult)) +
+  geom_bar(stat="identity") +
+  geom_text(aes(label=round(percent, 1)),
+            position = position_stack(vjust=0.5),
+            size = 3.5, color="white") +
+  scale_fill_manual(values = c("#2b3e8f", "#405ba0", "#7197c5")) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = 'top',
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 12),
+    panel.grid.major.x = element_blank()
+  ) +
+  labs(
+    y = "Percent",
+    fill = "Difficulty Level",
+    title = "Depression prevalence by sex and difficulty level (Aug 2021–Aug 2023)"
+  )
+```
